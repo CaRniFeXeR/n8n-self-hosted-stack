@@ -7,7 +7,7 @@ A comprehensive AWS CloudFormation template that automatically deploys a complet
 - **Fully Automated Deployment**: One-click deployment using AWS CloudFormation
 - **n8n Workflow Automation**: Complete n8n instance with PostgreSQL database
 - **Selenium WebDriver**: For web automation and testing workflows
-- **n8n MCP Server**: AI assistant integration for workflow management
+- **n8n MCP Server**: AI assistant integration for workflow management (accessible at `/custom-mcp`)
 - **Caddy Reverse Proxy**: Automatic HTTPS with SSL certificates
 - **Custom Domain Support**: Serve n8n on your own domain
 - **Security**: Proper security groups and configurable secrets
@@ -64,10 +64,191 @@ Following [Saurabh's philosophy](https://saurabh-sawhney.medium.com/self-hosting
 After approximately 10 minutes (the time taken for setup on the EC2), your n8n instance will be available at:
 - **n8n Interface**: `https://your-domain.com`
 - **Selenium WebDriver**: `http://elastic-ip:4444`
+- **n8n MCP Server**: `https://your-domain.com/custom-mcp`
 
 **Voila!** That's it - no more debugging, no more configuration headaches. Just like [Saurabh's experience](https://saurabh-sawhney.medium.com/self-hosting-the-workflow-automation-tool-n8n-on-aws-ec2-d4d2abf06282), this should work smoothly the first time around.
 
 ## 🔧 Configuration
+
+### MCP Server Configuration
+
+The n8n MCP server can be configured in two ways: **HTTP mode on the server** or **local Docker mode**. Each approach has different use cases and limitations.
+
+#### Option 1: Local Docker Mode (Recommended for Desktop Clients)
+
+**Best for**: Cursor, Claude Desktop, and other desktop MCP clients
+
+This approach runs the MCP server locally using Docker containers. Each MCP client session gets its own container instance, providing true multi-session support.
+
+**Advantages:**
+- ✅ **Multiple sessions** - Each client session gets its own container
+- ✅ **No authentication** - No need for Bearer tokens
+- ✅ **Automatic cleanup** - Containers are removed when sessions end
+- ✅ **No server-side setup** - Works with any n8n instance
+- ✅ **Isolation** - Each session is completely independent
+
+**Configuration:**
+```json
+{
+  "mcpServers": {
+    "n8n": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm", "--init",
+        "-e", "N8N_API_URL=https://your-domain.com/api/v1",
+        "-e", "N8N_API_KEY=your-n8n-api-key",
+        "ghcr.io/czlonkowski/n8n-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+**How it works:**
+1. **Cursor starts** → Creates a new Docker container
+2. **Container runs** → n8n-mcp server in stdio mode
+3. **API connection** → Connects to your n8n instance
+4. **Session ends** → Container is automatically removed (`--rm` flag)
+5. **New session** → Fresh container with clean state
+
+#### Option 2: HTTP Server Mode (For Web Clients)
+
+**Best for**: Web-based MCP clients, simple deployments, single-user scenarios
+
+The MCP server runs on your n8n server in HTTP mode and is accessible via your domain.
+
+**Limitations:**
+- ❌ **Single session only** - Only one client can connect at a time
+- ❌ **Authentication required** - Bearer token needed
+- ❌ **Server-side setup** - Requires Caddy routing configuration
+- ❌ **Session conflicts** - "Server already initialized" errors with multiple clients
+
+**Configuration:**
+
+**For Cursor (HTTP mode):**
+```json
+{
+  "mcpServers": {
+    "n8n": {
+      "command": "curl",
+      "args": [
+        "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "-H", "Accept: application/json, text/event-stream",
+        "-H", "Authorization: Bearer n8n-mcp-secure-token-55e2c81fceb0",
+        "https://your-domain.com/custom-mcp/mcp",
+        "-d", "@-"
+      ],
+      "env": {
+        "N8N_API_URL": "https://your-domain.com/api/v1",
+        "N8N_API_KEY": "your-n8n-api-key"
+      }
+    }
+  }
+}
+```
+
+**For Claude Desktop (HTTP mode):**
+```json
+{
+  "mcpServers": {
+    "n8n": {
+      "command": "curl",
+      "args": [
+        "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "-H", "Accept: application/json, text/event-stream",
+        "-H", "Authorization: Bearer n8n-mcp-secure-token-55e2c81fceb0",
+        "https://your-domain.com/custom-mcp/mcp",
+        "-d", "@-"
+      ],
+      "env": {
+        "N8N_API_URL": "https://your-domain.com/api/v1",
+        "N8N_API_KEY": "your-n8n-api-key"
+      }
+    }
+  }
+}
+```
+
+#### Option 3: Local Development
+
+For developers who want to run the MCP server locally from source:
+
+```bash
+git clone https://github.com/czlonkowski/n8n-mcp.git
+cd n8n-mcp
+npm install
+npm run build
+npm run start:http
+```
+
+Then configure:
+```json
+{
+  "mcpServers": {
+    "n8n": {
+      "command": "node",
+      "args": ["/path/to/n8n-mcp/dist/index.js"],
+      "env": {
+        "N8N_API_URL": "https://your-domain.com/api/v1",
+        "N8N_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+#### Option 4: Local Docker HTTP Mode
+
+You can also run the MCP server locally in HTTP mode using Docker:
+
+```bash
+docker run -d \
+  --name n8n-mcp-local \
+  -p 3000:3000 \
+  -e MCP_MODE=http \
+  -e AUTH_TOKEN=your-custom-token \
+  -e N8N_API_URL=https://your-domain.com/api/v1 \
+  -e N8N_API_KEY=your-n8n-api-key \
+  ghcr.io/czlonkowski/n8n-mcp:latest
+```
+
+Then configure your MCP client to connect to `http://localhost:3000/mcp`.
+
+**Recommendation:**
+- **For desktop MCP clients** (Cursor, Claude Desktop) → Use **Local Docker Mode**
+- **For web-based clients** → Use **HTTP Server Mode**
+- **For development** → Use **Local Development**
+
+**Note:** 
+- Replace `your-domain.com` with your actual domain
+- Replace `your-n8n-api-key` with your actual n8n API key
+- The HTTP mode authentication token can be changed by modifying the `AUTH_TOKEN` environment variable in the AWS stack
+- The MCP server endpoint is `/custom-mcp/mcp` (not just `/custom-mcp`)
+
+**Available MCP Tools:**
+
+The [czlonkowski/n8n-mcp](https://github.com/czlonkowski/n8n-mcp) server provides comprehensive tools:
+
+#### Core Tools
+- **`tools_documentation`** - Get documentation for any MCP tool
+- **`list_nodes`** - List all n8n nodes with filtering options
+- **`get_node_info`** - Get comprehensive information about a specific node
+- **`get_node_essentials`** - Get only essential properties with examples
+- **`search_nodes`** - Full-text search across all node documentation
+- **`validate_node_operation`** - Validate node configurations
+- **`validate_workflow`** - Complete workflow validation
+
+#### n8n Management Tools (when API configured)
+- **`n8n_create_workflow`** - Create new workflows with nodes and connections
+- **`n8n_get_workflow`** - Get complete workflow by ID
+- **`n8n_update_full_workflow`** - Update entire workflow
+- **`n8n_delete_workflow`** - Delete workflows permanently
+- **`n8n_list_workflows`** - List workflows with filtering and pagination
+- **`n8n_trigger_webhook_workflow`** - Trigger workflows via webhook URL
+- **`n8n_get_execution`** - Get execution details by ID
+- **`n8n_list_executions`** - List executions with status filtering
 
 ### Environment Variables
 
@@ -108,7 +289,7 @@ The stack provides the following outputs:
 - `CaddyDomain`: Your n8n URL
 - `SeleniumUrl`: Selenium WebDriver URL
 - `ElasticIP`: Static IP address
-- `McpServerInfo`: MCP server configuration details
+- `McpServerInfo`: MCP server accessible at `/custom-mcp` endpoint
 - `KeyDownloadCommand`: AWS CLI command to download SSH key
 
 ### SSH Access
@@ -135,6 +316,31 @@ ssh -i n8n-automatic-EC2-PemFile.pem ec2-user@your-elastic-ip
 3. **Services Not Starting**: Check Docker logs: `docker compose logs`
 4. **API Key Issues**: Generate a new API key in n8n settings
 5. **Browser Security Warnings**: If you see "unsafe" warnings, ensure you're using HTTPS and proper DNS configuration
+
+### MCP Server Troubleshooting
+
+1. **502 Bad Gateway**: The MCP server container might not be running. Check with:
+   ```bash
+   docker ps | grep n8n-mcp-server
+   docker logs n8n-mcp-server
+   ```
+
+2. **Authentication Errors**: Ensure your MCP client includes the correct Bearer token:
+   ```bash
+   curl -H "Authorization: Bearer n8n-mcp-secure-token-55e2c81fceb0" https://your-domain.com/custom-mcp/mcp
+   ```
+
+3. **Wrong Endpoint**: Make sure you're using `/custom-mcp/mcp` (not just `/custom-mcp`)
+
+4. **Caddy Routing Issues**: Restart the Caddy container to apply configuration changes:
+   ```bash
+   docker compose restart caddy
+   ```
+
+5. **MCP Server Not Starting**: Check if the environment variables are correct:
+   ```bash
+   docker exec n8n-mcp-server env | grep -E "(MCP_MODE|AUTH_TOKEN|PORT)"
+   ```
 
 ### Useful Commands
 

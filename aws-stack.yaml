@@ -252,13 +252,14 @@ Resources:
               restart: unless-stopped
 
             n8n-mcp-server:
-              image: leonardsellem/n8n-mcp-server
+              image: ghcr.io/czlonkowski/n8n-mcp:latest
               container_name: n8n-mcp-server
               restart: unless-stopped
               environment:
                 - N8N_API_URL=http://n8n:5678/api/v1
-                - N8N_WEBHOOK_USERNAME=admin
-                - N8N_WEBHOOK_PASSWORD=admin
+                - PORT=3000
+                - MCP_MODE=http
+                - AUTH_TOKEN=n8n-mcp-secure-token-55e2c81fceb0
               env_file:
                 - path: .env
                   required: true
@@ -266,6 +267,9 @@ Resources:
                 - n8n
               networks:
                 - demo
+              # Run as HTTP server on port 3000
+              ports:
+                - "3000:3000"
 
             # Hide Ollama and Qdrant services by setting them to not start
             ollama-cpu:
@@ -293,6 +297,12 @@ Resources:
           cat << EOF > caddy/Caddyfile
           ${DomainName} {
               reverse_proxy n8n:5678
+              
+              # MCP server endpoint - all paths under /custom-mcp/
+              handle_path /custom-mcp/* {
+                  uri strip_prefix /custom-mcp
+                  reverse_proxy n8n-mcp-server:3000
+              }
           }
           EOF
 
@@ -339,7 +349,7 @@ Outputs:
 
   McpServerInfo:
     Description: n8n MCP Server is running in the container and ready to communicate with n8n
-    Value: !Sub "MCP server configured with API URL: http://n8n:5678/api/v1"
+    Value: !Sub "MCP server accessible at https://${DomainName}/custom-mcp"
 
   ElasticIP:
     Description: Elastic IP assigned to EC2 (use this to configure your DNS A record)
