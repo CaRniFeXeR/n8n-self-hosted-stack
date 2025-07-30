@@ -218,95 +218,11 @@ Resources:
           N8N_API_KEY=${N8nApiKey}
           EOF
 
-          echo "Creating custom docker-compose.yml with Selenium and without Ollama/Qdrant"
-          cat << 'EOF' > docker-compose.yml
-          volumes:
-            n8n_storage:
-            postgres_storage:
+          echo "Downloading the original docker-compose.yml from the repo"
+          curl -o docker-compose.yml https://raw.githubusercontent.com/n8n-io/self-hosted-ai-starter-kit/main/docker-compose.yml
 
-          networks:
-            demo:
-
-          x-n8n: &service-n8n
-            image: n8nio/n8n:latest
-            networks: ['demo']
-            environment:
-              - DB_TYPE=postgresdb
-              - DB_POSTGRESDB_HOST=postgres
-              - DB_POSTGRESDB_USER=${POSTGRES_USER}
-              - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-              - N8N_DIAGNOSTICS_ENABLED=false
-              - N8N_PERSONALIZATION_ENABLED=false
-              - N8N_ENCRYPTION_KEY
-              - N8N_USER_MANAGEMENT_JWT_SECRET
-            env_file:
-              - path: .env
-                required: true
-
-          services:
-            postgres:
-              image: postgres:16-alpine
-              hostname: postgres
-              networks: ['demo']
-              restart: unless-stopped
-              environment:
-                - POSTGRES_USER
-                - POSTGRES_PASSWORD
-                - POSTGRES_DB
-              volumes:
-                - postgres_storage:/var/lib/postgresql/data
-              healthcheck:
-                test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
-                interval: 5s
-                timeout: 5s
-                retries: 10
-
-            n8n-import:
-              <<: *service-n8n
-              hostname: n8n-import
-              container_name: n8n-import
-              entrypoint: /bin/sh
-              command:
-                - "-c"
-                - "n8n import:credentials --separate --input=/demo-data/credentials && n8n import:workflow --separate --input=/demo-data/workflows"
-              volumes:
-                - ./n8n/demo-data:/demo-data
-              depends_on:
-                postgres:
-                  condition: service_healthy
-
-            n8n:
-              <<: *service-n8n
-              hostname: n8n
-              container_name: n8n
-              restart: unless-stopped
-              ports:
-                - 5678:5678
-              volumes:
-                - n8n_storage:/home/node/.n8n
-                - ./n8n/demo-data:/dearm6mo-data
-                - ./shared:/data/shared
-              depends_on:
-                postgres:
-                  condition: service_healthy
-                n8n-import:
-                  condition: service_completed_successfully
-
-            selenium:
-              image: seleniarm/standalone-chromium:latest
-              container_name: selenium
-              networks: ['demo']
-              ports:
-                - 4444:4444
-              shm_size: 2g
-              environment:
-                - SE_NODE_MAX_SESSIONS=1
-                - SE_NODE_SESSION_TIMEOUT=1800
-              restart: unless-stopped
-          EOF
-
-          echo "Creating Docker Compose override to add Caddy and n8n-mcp-server"
-          cat << 'EOF' > docker-compose.override.yml
+          echo "Creating Docker Compose override to add Caddy, Selenium, n8n-mcp-server and hide Ollama/Qdrant"
+          cat << EOF > docker-compose.override.yml
           services:
             caddy:
               image: caddy:2.9.1-alpine
@@ -323,19 +239,49 @@ Resources:
               networks:
                 - demo
 
+            selenium:
+              image: seleniarm/standalone-chromium:latest
+              container_name: selenium
+              networks: ['demo']
+              ports:
+                - 4444:4444
+              shm_size: 2g
+              environment:
+                - SE_NODE_MAX_SESSIONS=1
+                - SE_NODE_SESSION_TIMEOUT=1800
+              restart: unless-stopped
+
             n8n-mcp-server:
               image: leonardsellem/n8n-mcp-server
               container_name: n8n-mcp-server
               restart: unless-stopped
               environment:
                 - N8N_API_URL=http://n8n:5678/api/v1
-                - N8N_API_KEY=${N8N_API_KEY}
                 - N8N_WEBHOOK_USERNAME=admin
                 - N8N_WEBHOOK_PASSWORD=admin
+              env_file:
+                - path: .env
+                  required: true
               depends_on:
                 - n8n
               networks:
                 - demo
+
+            # Hide Ollama and Qdrant services by setting them to not start
+            ollama-cpu:
+              profiles: ["disabled"]
+            ollama-gpu:
+              profiles: ["disabled"]
+            ollama-gpu-amd:
+              profiles: ["disabled"]
+            ollama-pull-llama-cpu:
+              profiles: ["disabled"]
+            ollama-pull-llama-gpu:
+              profiles: ["disabled"]
+            ollama-pull-llama-gpu-amd:
+              profiles: ["disabled"]
+            qdrant:
+              profiles: ["disabled"]
 
           volumes:
             caddy_data:
@@ -344,7 +290,7 @@ Resources:
 
           echo "Creating Caddyfile with parametrized domain (added at the time of stack creation)"
           mkdir -p caddy
-          cat << 'EOF' > caddy/Caddyfile
+          cat << EOF > caddy/Caddyfile
           ${DomainName} {
               reverse_proxy n8n:5678
           }
