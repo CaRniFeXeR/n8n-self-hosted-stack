@@ -201,11 +201,7 @@ Resources:
             sleep 5
           done
 
-          echo "Cloning n8n-mcp-server repository"
-          until git clone https://github.com/leonardsellem/n8n-mcp-server.git /home/ec2-user/self-hosted-ai-starter-kit/n8n-mcp-server; do
-            echo "Retrying n8n-mcp-server git clone..."
-            sleep 5
-          done
+
 
           cd /home/ec2-user/self-hosted-ai-starter-kit
           
@@ -328,27 +324,18 @@ Resources:
                 - demo
 
             n8n-mcp-server:
-              image: node:18-alpine
+              image: leonardsellem/n8n-mcp-server
               container_name: n8n-mcp-server
               restart: unless-stopped
-              working_dir: /app
-              volumes:
-                - ./n8n-mcp-server:/app
               environment:
                 - N8N_API_URL=http://n8n:5678/api/v1
                 - N8N_API_KEY=${N8N_API_KEY}
-                - NODE_ENV=production
+                - N8N_WEBHOOK_USERNAME=admin
+                - N8N_WEBHOOK_PASSWORD=admin
               depends_on:
                 - n8n
               networks:
                 - demo
-              command: >
-                sh -c "
-                  cd /app &&
-                  npm install &&
-                  npm run build &&
-                  node build/index.js
-                "
 
           volumes:
             caddy_data:
