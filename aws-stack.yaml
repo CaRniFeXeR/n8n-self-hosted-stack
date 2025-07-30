@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  This template creates all resources required to setup and run an n8n setup on AWS
+  and configures and runs a Caddy reverse proxy to serve n8n on a custom domain.
+  Everything is automated.
+  version dated 14 April 2025
+  
+Parameters:
+
+  DomainName:
+    Type: String
+    Default: n8n.xyz.com
+    Description: The fully qualified domain name to serve (e.g. n8n.staging.xyz.com)
+
+  WebhookUrl:
+    Type: String
+    Default: https://n8n.xyz.com/
+    Description: The webhook URL for n8n configuration
+
+  N8nEncryptionKey:
+    Type: String
+    Default: your-encryption-key-here
+    Description: Encryption key for n8n (should be a secure random string)
+
+  N8nJwtSecret:
+    Type: String
+    Default: your-jwt-secret-here
+    Description: JWT secret for n8n user management (should be a secure random string)
+
+  N8nApiKey:
+    Type: String
+    Default: your-n8n-api-key-here
+    Description: API key for n8n (required for MCP server communication)
+
+  InstanceName:
+    Type: String
+    Default: n8n-automatic-EC2
+    Description: Name tag for the EC2 instance
+
+  KeyPairName:
+    Type: String
+    Default: n8n-automatic-EC2-PemFile
+    Description: Name of the EC2 KeyPair that will be created
+
+  SecurityGroupName:
+    Type: String
+    Default: n8n-automatic-Security-Group
+    Description: Name for the security group
+
+  AmazonLinuxAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Latest Amazon Linux 2023 AMI (Arm64) for the current region.
+
+
+Resources:
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ec2-keypair-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KeyPairCreationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateKeyPair
+                  - ec2:DeleteKeyPair
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  CreateKeyPairFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: create-keypair-fn
+      Handler: index.handler
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def handler(event, context):
+              ec2 = boto3.client('ec2')
+              ssm = boto3.client('ssm')
+              key_name = event['ResourceProperties'].get('KeyPairName', 'default-key-name')
+
+              try:
+                  if event['RequestType'] in ['Create', 'Update']:
+                      key = ec2.create_key_pair(KeyName=key_name, KeyFormat='pem')
+                      private_key = key['KeyMaterial']
+                      ssm.put_parameter(
+                          Name=f'/ec2/privateKey/{key_name}',
+                          Description='EC2 private key for SSH access',
+                          Value=private_key,
+                          Type='SecureString',
+                          Overwrite=True
+                      )
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, physicalResourceId=key_name)
+                  elif event['RequestType'] == 'Delete':
+                      try:
+                          ec2.delete_key_pair(KeyName=key_name)
+                      except Exception:
+                          pass
+                      try:
+                          ssm.delete_parameter(Name=f'/ec2/privateKey/{key_name}')
+                      except Exception:
+                          pass
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, physicalResourceId=key_name)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Message': str(e)}, physicalResourceId=key_name)
+
+  KeyPairCustomResource:
+    Type: Custom::KeyPairCreator
+    Properties:
+      ServiceToken: !GetAtt CreateKeyPairFunction.Arn
+      KeyPairName: !Ref KeyPairName
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref SecurityGroupName  
+      GroupDescription: Allow SSH, HTTP, HTTPS, n8n port 5678, and Selenium port 4444
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5678
+          ToPort: 5678
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 4444
+          ToPort: 4444
+          CidrIp: 0.0.0.0/0  
+
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: KeyPairCustomResource
+    Properties:
+      InstanceType: t4g.micro
+      KeyName: !Ref KeyPairName
+      ImageId: !Ref AmazonLinuxAmi
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install git -y
+          yum install -y docker
+          systemctl start docker
+          systemctl enable docker
+          usermod -aG docker ec2-user
+
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64 \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          echo "Waiting for network to stabilize"
+          sleep 15
+          until git clone https://github.com/n8n-io/self-hosted-ai-starter-kit.git /home/ec2-user/self-hosted-ai-starter-kit; do
+            echo "Retrying git clone..."
+            sleep 5
+          done
+
+          echo "Cloning n8n-mcp-server repository"
+          until git clone https://github.com/leonardsellem/n8n-mcp-server.git /home/ec2-user/self-hosted-ai-starter-kit/n8n-mcp-server; do
+            echo "Retrying n8n-mcp-server git clone..."
+            sleep 5
+          done
+
+          cd /home/ec2-user/self-hosted-ai-starter-kit
+          
+          echo "Creating custom .env file with n8n configuration"
+          cat << EOF > .env
+          POSTGRES_USER=n8n
+          POSTGRES_PASSWORD=n8n
+          POSTGRES_DB=n8n
+          N8N_ENCRYPTION_KEY=${N8nEncryptionKey}
+          N8N_USER_MANAGEMENT_JWT_SECRET=${N8nJwtSecret}
+          N8N_PAYLOAD_SIZE_MAX=100
+          NODE_FUNCTION_ALLOW_EXTERNAL=node-fetch
+          WEBHOOK_URL=${WebhookUrl}
+          N8N_API_KEY=${N8nApiKey}
+          EOF
+
+          echo "Creating custom docker-compose.yml with Selenium and without Ollama/Qdrant"
+          cat << 'EOF' > docker-compose.yml
+          volumes:
+            n8n_storage:
+            postgres_storage:
+
+          networks:
+            demo:
+
+          x-n8n: &service-n8n
+            image: n8nio/n8n:latest
+            networks: ['demo']
+            environment:
+              - DB_TYPE=postgresdb
+              - DB_POSTGRESDB_HOST=postgres
+              - DB_POSTGRESDB_USER=${POSTGRES_USER}
+              - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+              - N8N_DIAGNOSTICS_ENABLED=false
+              - N8N_PERSONALIZATION_ENABLED=false
+              - N8N_ENCRYPTION_KEY
+              - N8N_USER_MANAGEMENT_JWT_SECRET
+            env_file:
+              - path: .env
+                required: true
+
+          services:
+            postgres:
+              image: postgres:16-alpine
+              hostname: postgres
+              networks: ['demo']
+              restart: unless-stopped
+              environment:
+                - POSTGRES_USER
+                - POSTGRES_PASSWORD
+                - POSTGRES_DB
+              volumes:
+                - postgres_storage:/var/lib/postgresql/data
+              healthcheck:
+                test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+                interval: 5s
+                timeout: 5s
+                retries: 10
+
+            n8n-import:
+              <<: *service-n8n
+              hostname: n8n-import
+              container_name: n8n-import
+              entrypoint: /bin/sh
+              command:
+                - "-c"
+                - "n8n import:credentials --separate --input=/demo-data/credentials && n8n import:workflow --separate --input=/demo-data/workflows"
+              volumes:
+                - ./n8n/demo-data:/demo-data
+              depends_on:
+                postgres:
+                  condition: service_healthy
+
+            n8n:
+              <<: *service-n8n
+              hostname: n8n
+              container_name: n8n
+              restart: unless-stopped
+              ports:
+                - 5678:5678
+              volumes:
+                - n8n_storage:/home/node/.n8n
+                - ./n8n/demo-data:/dearm6mo-data
+                - ./shared:/data/shared
+              depends_on:
+                postgres:
+                  condition: service_healthy
+                n8n-import:
+                  condition: service_completed_successfully
+
+            selenium:
+              image: seleniarm/standalone-chromium:latest
+              container_name: selenium
+              networks: ['demo']
+              ports:
+                - 4444:4444
+              shm_size: 2g
+              environment:
+                - SE_NODE_MAX_SESSIONS=1
+                - SE_NODE_SESSION_TIMEOUT=1800
+              restart: unless-stopped
+          EOF
+
+          echo "Creating Docker Compose override to add Caddy and n8n-mcp-server"
+          cat << 'EOF' > docker-compose.override.yml
+          services:
+            caddy:
+              image: caddy:2.9.1-alpine
+              restart: unless-stopped
+              ports:
+                - "80:80"
+                - "443:443"
+              volumes:
+                - ./caddy/Caddyfile:/etc/caddy/Caddyfile
+                - caddy_data:/data
+                - caddy_config:/config
+              depends_on:
+                - n8n
+              networks:
+                - demo
+
+            n8n-mcp-server:
+              image: node:18-alpine
+              container_name: n8n-mcp-server
+              restart: unless-stopped
+              working_dir: /app
+              volumes:
+                - ./n8n-mcp-server:/app
+              environment:
+                - N8N_API_URL=http://n8n:5678/api/v1
+                - N8N_API_KEY=${N8N_API_KEY}
+                - NODE_ENV=production
+              depends_on:
+                - n8n
+              networks:
+                - demo
+              command: >
+                sh -c "
+                  cd /app &&
+                  npm install &&
+                  npm run build &&
+                  node build/index.js
+                "
+
+          volumes:
+            caddy_data:
+            caddy_config:
+          EOF
+
+          echo "Creating Caddyfile with parametrized domain (added at the time of stack creation)"
+          mkdir -p caddy
+          cat << 'EOF' > caddy/Caddyfile
+          ${DomainName} {
+              reverse_proxy n8n:5678
+          }
+          EOF
+
+          cd /home/ec2-user || exit 1
+          cat << 'EOF' > startup.sh
+          #!/bin/bash
+          cd /home/ec2-user/self-hosted-ai-starter-kit
+          echo "Will need to pull images. This may take a while..."
+          sudo docker compose -f docker-compose.yml up -d
+          echo "Waiting for n8n to become available..."
+          until curl -s http://localhost:5678 > /dev/null; do
+            echo "Waiting for n8n on port 5678..."
+            sleep 10
+          done
+          echo "n8n is up! Now launching Caddy and MCP server..."
+          sudo docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+          sleep 5
+          echo "All set, go to https://${DomainName} to access n8n!"
+          echo "Selenium is available on port 4444"
+          echo "n8n MCP server is running and ready to communicate with n8n"
+          EOF
+
+          chmod +x startup.sh
+          ./startup.sh
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref MyEC2Instance
+      EIP: !Ref ElasticIP
+
+Outputs:
+
+  CaddyDomain:
+    Description: Visit this URL after DNS is configured to point to the Elastic IP
+    Value: !Sub "https://${DomainName}"
+
+  SeleniumUrl:
+    Description: Selenium WebDriver URL (accessible via the Elastic IP)
+    Value: !Sub "http://${ElasticIP}:4444"
+
+  McpServerInfo:
+    Description: n8n MCP Server is running in the container and ready to communicate with n8n
+    Value: !Sub "MCP server configured with API URL: http://n8n:5678/api/v1"
+
+  ElasticIP:
+    Description: Elastic IP assigned to EC2 (use this to configure your DNS A record)
+    Value: !Ref ElasticIP    
+
+  KeyDownloadCommand:
+    Description: AWS CLI command to download the SSH private key from SSM Parameter Store
+    Value: !Sub |
+      aws ssm get-parameter --name /ec2/privateKey/${KeyPairName} --with-decryption --query Parameter.Value --output text > ${KeyPairName}.pem && chmod 400 ${KeyPairName}.pem
+    Export:
+      Name: KeyDownloadCommand
